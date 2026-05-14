@@ -193,25 +193,31 @@ generate_boot_script() {
     script_content=$(
         cat << 'EOF'
 #!/bin/sh
-set -x
 exec > /tmp/wg-starter-log.txt 2>&1
+
+log() { echo "$(date '+%Y-%m-%d %H:%M:%S') $*"; }
 
 WATCHDOG_PID_FILE="/tmp/wg-watchdog.pid"
 
 interface_up() {
+    log "interface: bringing up __INTERFACE__"
     /sbin/modprobe wireguard
     /sbin/ip link add dev __INTERFACE__ type wireguard
     /sbin/ip address add dev __INTERFACE__ __IP_ADDRESS__
     /userdata/wg setconf __INTERFACE__ /userdata/__INTERFACE__.conf
     /sbin/ip link set up dev __INTERFACE__
+    log "interface: __INTERFACE__ is up"
 }
 
 interface_down() {
+    log "interface: bringing down __INTERFACE__"
     /sbin/ip link delete dev __INTERFACE__ 2>/dev/null
+    log "interface: __INTERFACE__ is down"
 }
 
 watchdog_stop() {
     if [ -f "$WATCHDOG_PID_FILE" ]; then
+        log "watchdog: stopping (pid=$(cat "$WATCHDOG_PID_FILE"))"
         kill "$(cat "$WATCHDOG_PID_FILE")" 2>/dev/null
         rm -f "$WATCHDOG_PID_FILE"
     fi
@@ -220,13 +226,13 @@ watchdog_stop() {
 watchdog_start() {
     watchdog_stop
     (
-        echo "watchdog: started (interval=__WATCHDOG_INTERVAL__s, timeout=__WATCHDOG_HANDSHAKE_TIMEOUT__s)"
+        log "watchdog: started (interval=__WATCHDOG_INTERVAL__s, timeout=__WATCHDOG_HANDSHAKE_TIMEOUT__s)"
         while true; do
             /bin/sleep __WATCHDOG_INTERVAL__
 
             # Check if interface exists
             if ! /sbin/ip link show __INTERFACE__ > /dev/null 2>&1; then
-                echo "watchdog: interface __INTERFACE__ missing, recreating..."
+                log "watchdog: interface __INTERFACE__ missing, recreating..."
                 interface_up
                 continue
             fi
@@ -236,7 +242,7 @@ watchdog_start() {
                 | awk '{print $2}' | head -1)
 
             if [ -z "$HANDSHAKE" ] || [ "$HANDSHAKE" = "0" ]; then
-                echo "watchdog: no handshake yet, restarting interface..."
+                log "watchdog: no handshake yet, restarting interface..."
                 interface_down
                 /bin/sleep 2
                 interface_up
@@ -247,7 +253,7 @@ watchdog_start() {
             AGE=$((NOW - HANDSHAKE))
 
             if [ "$AGE" -gt __WATCHDOG_HANDSHAKE_TIMEOUT__ ]; then
-                echo "watchdog: handshake stale (${AGE}s old), restarting interface..."
+                log "watchdog: handshake stale (${AGE}s old), restarting interface..."
                 interface_down
                 /bin/sleep 2
                 interface_up
@@ -255,29 +261,36 @@ watchdog_start() {
         done
     ) >> /tmp/wg-watchdog-log.txt 2>&1 &
     echo $! > "$WATCHDOG_PID_FILE"
-    echo "watchdog: background process started (pid=$(cat "$WATCHDOG_PID_FILE"))"
+    log "watchdog: background process started (pid=$(cat "$WATCHDOG_PID_FILE"))"
 }
 
 start() {
+    log "start: loading wireguard kernel module"
     /sbin/modprobe wireguard
+    log "start: waiting __BOOT_DELAY__s for network to be ready"
     /bin/sleep __BOOT_DELAY__
     interface_up
     watchdog_start
 }
 
 stop() {
+    log "stop: stopping wireguard"
     watchdog_stop
     interface_down
+    log "stop: done"
 }
 
 case "$1" in
     start)
+       log "wg-starter: starting"
        start
        ;;
     stop)
+       log "wg-starter: stopping"
        stop
        ;;
     restart)
+       log "wg-starter: restarting"
        stop
        start
        ;;
