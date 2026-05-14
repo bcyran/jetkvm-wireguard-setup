@@ -67,6 +67,8 @@ load_config() {
     WIREGUARD_IP="${WIREGUARD_IP:-192.168.2.1/24}"
     FORCE_BUILD="${FORCE_BUILD:-no}"
     BOOT_DELAY="${BOOT_DELAY:-30}"
+    WATCHDOG_INTERVAL="${WATCHDOG_INTERVAL:-60}"
+    WATCHDOG_HANDSHAKE_TIMEOUT="${WATCHDOG_HANDSHAKE_TIMEOUT:-180}"
 
     # Validate required variables
     if [[ -z "${JETKVM_IP:-}" ]]; then
@@ -194,17 +196,78 @@ generate_boot_script() {
 set -x
 exec > /tmp/wg-starter-log.txt 2>&1
 
-start() {
+WATCHDOG_PID_FILE="/tmp/wg-watchdog.pid"
+
+interface_up() {
     /sbin/modprobe wireguard
-    /bin/sleep __BOOT_DELAY__
     /sbin/ip link add dev __INTERFACE__ type wireguard
     /sbin/ip address add dev __INTERFACE__ __IP_ADDRESS__
     /userdata/wg setconf __INTERFACE__ /userdata/__INTERFACE__.conf
     /sbin/ip link set up dev __INTERFACE__
 }
 
+interface_down() {
+    /sbin/ip link delete dev __INTERFACE__ 2>/dev/null
+}
+
+watchdog_stop() {
+    if [ -f "$WATCHDOG_PID_FILE" ]; then
+        kill "$(cat "$WATCHDOG_PID_FILE")" 2>/dev/null
+        rm -f "$WATCHDOG_PID_FILE"
+    fi
+}
+
+watchdog_start() {
+    watchdog_stop
+    (
+        echo "watchdog: started (interval=__WATCHDOG_INTERVAL__s, timeout=__WATCHDOG_HANDSHAKE_TIMEOUT__s)"
+        while true; do
+            /bin/sleep __WATCHDOG_INTERVAL__
+
+            # Check if interface exists
+            if ! /sbin/ip link show __INTERFACE__ > /dev/null 2>&1; then
+                echo "watchdog: interface __INTERFACE__ missing, recreating..."
+                interface_up
+                continue
+            fi
+
+            # Check latest handshake age
+            HANDSHAKE=$(/userdata/wg show __INTERFACE__ latest-handshakes 2>/dev/null \
+                | awk '{print $2}' | head -1)
+
+            if [ -z "$HANDSHAKE" ] || [ "$HANDSHAKE" = "0" ]; then
+                echo "watchdog: no handshake yet, restarting interface..."
+                interface_down
+                /bin/sleep 2
+                interface_up
+                continue
+            fi
+
+            NOW=$(date +%s)
+            AGE=$((NOW - HANDSHAKE))
+
+            if [ "$AGE" -gt __WATCHDOG_HANDSHAKE_TIMEOUT__ ]; then
+                echo "watchdog: handshake stale (${AGE}s old), restarting interface..."
+                interface_down
+                /bin/sleep 2
+                interface_up
+            fi
+        done
+    ) >> /tmp/wg-watchdog-log.txt 2>&1 &
+    echo $! > "$WATCHDOG_PID_FILE"
+    echo "watchdog: background process started (pid=$(cat "$WATCHDOG_PID_FILE"))"
+}
+
+start() {
+    /sbin/modprobe wireguard
+    /bin/sleep __BOOT_DELAY__
+    interface_up
+    watchdog_start
+}
+
 stop() {
-    /sbin/ip link delete dev __INTERFACE__
+    watchdog_stop
+    interface_down
 }
 
 case "$1" in
@@ -230,6 +293,8 @@ EOF
     script_content="${script_content//__BOOT_DELAY__/${BOOT_DELAY}}"
     script_content="${script_content//__INTERFACE__/${WIREGUARD_INTERFACE}}"
     script_content="${script_content//__IP_ADDRESS__/${WIREGUARD_IP}}"
+    script_content="${script_content//__WATCHDOG_INTERVAL__/${WATCHDOG_INTERVAL}}"
+    script_content="${script_content//__WATCHDOG_HANDSHAKE_TIMEOUT__/${WATCHDOG_HANDSHAKE_TIMEOUT}}"
 
     echo "${script_content}"
 }
@@ -312,12 +377,14 @@ main() {
     echo ""
     log_info "WireGuard is now running on your JetKVM device"
     log_info "The interface will automatically start on boot"
+    log_info "A watchdog process will monitor and reconnect if the tunnel drops"
     echo ""
     log_info "Useful commands (run on JetKVM via SSH):"
-    log_info "  wg show                    # Show current status"
-    log_info "  /userdata/wg-starter stop  # Stop WireGuard"
-    log_info "  /userdata/wg-starter start # Start WireGuard"
-    log_info "  cat /tmp/wg-starter-log.txt # View boot logs"
+    log_info "  wg show                     # Show current status"
+    log_info "  /userdata/wg-starter stop   # Stop WireGuard + watchdog"
+    log_info "  /userdata/wg-starter start  # Start WireGuard + watchdog"
+    log_info "  cat /tmp/wg-starter-log.txt  # View boot logs"
+    log_info "  cat /tmp/wg-watchdog-log.txt # View watchdog logs"
     echo ""
 }
 

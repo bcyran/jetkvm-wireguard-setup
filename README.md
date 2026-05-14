@@ -98,6 +98,8 @@ wg genkey | tee peer-private.key | wg pubkey > peer-public.key
 | `CONTAINER_RUNTIME` | `podman` or `docker` | Auto-detect (prefers podman) |
 | `FORCE_BUILD` | Force rebuild of binary | `no` |
 | `BOOT_DELAY` | Seconds to wait before starting WireGuard on boot | `30` |
+| `WATCHDOG_INTERVAL` | How often (seconds) the watchdog checks the connection | `60` |
+| `WATCHDOG_HANDSHAKE_TIMEOUT` | Max handshake age (seconds) before restarting | `180` |
 
 ### Configuration Examples
 
@@ -116,10 +118,10 @@ After installation, you can manage WireGuard by SSHing into your JetKVM:
 # Show current status
 wg show
 
-# Stop WireGuard
+# Stop WireGuard (also stops the watchdog)
 /userdata/wg-starter stop
 
-# Start WireGuard
+# Start WireGuard (also starts the watchdog)
 /userdata/wg-starter start
 
 # Restart WireGuard
@@ -127,7 +129,23 @@ wg show
 
 # View boot logs
 cat /tmp/wg-starter-log.txt
+
+# View watchdog logs
+cat /tmp/wg-watchdog-log.txt
 ```
+
+### Connection Watchdog
+
+The installation includes a background watchdog process that automatically reconnects if the WireGuard tunnel goes down. It works by periodically checking the latest WireGuard handshake timestamp and restarting the interface if the handshake is stale.
+
+**How it works:**
+
+1. Every `WATCHDOG_INTERVAL` seconds (default: 60), the watchdog checks:
+   - Whether the WireGuard interface still exists (recreates it if missing)
+   - Whether the latest handshake is older than `WATCHDOG_HANDSHAKE_TIMEOUT` seconds (default: 180)
+2. If the connection appears broken, it tears down the interface, waits 2 seconds, and recreates it
+
+**Requirements:** Your WireGuard peer configuration must include `PersistentKeepalive` (e.g., `PersistentKeepalive = 25`) for the handshake-based detection to work. Without it, WireGuard only performs handshakes when there is traffic, so the watchdog cannot reliably detect a dead connection.
 
 ## Advanced Configuration
 
